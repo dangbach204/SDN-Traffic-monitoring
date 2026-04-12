@@ -8,3 +8,4 @@ mininet/__pycache__/
 frontend/node_modules/
 frontend/build/
 frontend/.env.local
+frontend/.next/

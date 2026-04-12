@@ -1,36 +1,124 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import StatCard from "@/components/dashboard/stat-card";
 import ThroughputChart from "@/components/dashboard/throughput-chart";
 import JitterChart from "@/components/dashboard/jitter-chart";
-import useDashboardData from "@/hooks/use-dashboard-data";
-import { API_BASE_URL } from "@/constants/api-endpoint";
-import type { Topology } from "@/types/metrics";
+import api from "@/lib/axios";
+import type {
+  DashboardStats,
+  JitterPoint,
+  JitterResponse,
+  ThroughputPoint,
+  ThroughputResponse,
+  Topology,
+} from "@/types/metrics";
+
+const EMPTY_STATS: DashboardStats = {
+  avgThroughput: 0,
+  maxThroughput: 0,
+  avgJitter: 0,
+  maxJitter: 0,
+};
+
+const formatTime = (timestamp: string) => {
+  const date = new Date(timestamp);
+  return date.toLocaleTimeString("en-GB", { hour12: false });
+};
 
 export default function Home() {
   const [topology, setTopology] = useState<Topology>("single");
-  const { stats, throughputData, jitterData, isLoading, error } =
-    useDashboardData(topology);
+  const [throughputData, setThroughputData] = useState<ThroughputPoint[]>([]);
+  const [jitterData, setJitterData] = useState<JitterPoint[]>([]);
+  const [stats, setStats] = useState<DashboardStats>(EMPTY_STATS);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSwitching, setIsSwitching] = useState(false);
 
-  if (error) {
-    return (
-      <div className="min-h-screen bg-gray-50 p-8 flex items-center justify-center">
-        <div className="text-center">
-          <h1 className="text-2xl font-bold text-red-600 mb-2">
-            Connection Error
-          </h1>
-          <p className="text-gray-600 mb-4">
-            Unable to connect to API at {API_BASE_URL}
-          </p>
-          <p className="text-sm text-gray-500">
-            Make sure the backend server is running.
-          </p>
-        </div>
-      </div>
-    );
-  }
+  const fetchMetrics = useCallback(async (selectedTopology: Topology) => {
+    try {
+      const [throughputResponse, jitterResponse] = await Promise.all([
+        api.get<ThroughputResponse[]>("/metrics/throughput", {
+          params: { topology: selectedTopology },
+        }),
+        api.get<JitterResponse[]>("/metrics/jitter", {
+          params: { topology: selectedTopology },
+        }),
+      ]);
+
+      const nextThroughputData = throughputResponse.data
+        .map((point) => ({
+          time: formatTime(point.timestamp),
+          throughput: point.throughput_mbps,
+        }))
+        .slice(-30);
+
+      const nextJitterData = jitterResponse.data
+        .map((point) => ({
+          time: formatTime(point.timestamp),
+          jitter: point.jitter_ms,
+          packetLoss: point.packet_loss_pct,
+        }))
+        .slice(-30);
+
+      setThroughputData(nextThroughputData);
+      setJitterData(nextJitterData);
+
+      const throughputValues = nextThroughputData.map(
+        (point) => point.throughput,
+      );
+      const jitterValues = nextJitterData.map((point) => point.jitter);
+
+      const avgThroughput =
+        throughputValues.length > 0
+          ? throughputValues.reduce((sum, value) => sum + value, 0) /
+            throughputValues.length
+          : 0;
+      const maxThroughput =
+        throughputValues.length > 0 ? Math.max(...throughputValues) : 0;
+      const avgJitter =
+        jitterValues.length > 0
+          ? jitterValues.reduce((sum, value) => sum + value, 0) /
+            jitterValues.length
+          : 0;
+      const maxJitter = jitterValues.length > 0 ? Math.max(...jitterValues) : 0;
+
+      setStats({ avgThroughput, maxThroughput, avgJitter, maxJitter });
+    } catch (err) {
+      console.log("Failed to fetch dashboard metrics", err);
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  const changeTopology = async (type: string) => {
+    if (type !== "single" && type !== "linear" && type !== "tree") {
+      return;
+    }
+
+    const selectedTopology = type as Topology;
+
+    try {
+      setIsSwitching(true);
+      await api.post("/control/topology", { name: selectedTopology });
+      setTopology(selectedTopology);
+      await fetchMetrics(selectedTopology);
+    } catch (err) {
+      console.log("Failed to change topology", err);
+    } finally {
+      setIsSwitching(false);
+    }
+  };
+
+  useEffect(() => {
+    setIsLoading(true);
+    fetchMetrics(topology);
+    const intervalId = setInterval(() => fetchMetrics(topology), 300000);
+
+    return () => {
+      clearInterval(intervalId);
+    };
+  }, [fetchMetrics, topology]);
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -54,34 +142,37 @@ export default function Home() {
         <div className="mb-8">
           <div className="flex gap-2">
             <button
-              onClick={() => setTopology("single")}
+              onClick={() => changeTopology("single")}
+              disabled={isSwitching}
               className={`px-4 py-2 rounded-lg font-medium transition-colors ${
                 topology === "single"
                   ? "bg-blue-600 text-white"
                   : "bg-white text-gray-700 border border-gray-200 hover:bg-gray-50"
               }`}
             >
-              Single
+              {isSwitching ? "Switching..." : "Single"}
             </button>
             <button
-              onClick={() => setTopology("linear")}
+              onClick={() => changeTopology("linear")}
+              disabled={isSwitching}
               className={`px-4 py-2 rounded-lg font-medium transition-colors ${
                 topology === "linear"
                   ? "bg-blue-600 text-white"
                   : "bg-white text-gray-700 border border-gray-200 hover:bg-gray-50"
               }`}
             >
-              Linear
+              {isSwitching ? "Switching..." : "Linear"}
             </button>
             <button
-              onClick={() => setTopology("tree")}
+              onClick={() => changeTopology("tree")}
+              disabled={isSwitching}
               className={`px-4 py-2 rounded-lg font-medium transition-colors ${
                 topology === "tree"
                   ? "bg-blue-600 text-white"
                   : "bg-white text-gray-700 border border-gray-200 hover:bg-gray-50"
               }`}
             >
-              Tree
+              {isSwitching ? "Switching..." : "Tree"}
             </button>
           </div>
         </div>

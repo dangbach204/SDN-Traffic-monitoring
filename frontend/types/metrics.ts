@@ -24,3 +24,27 @@ export interface DashboardStats {
   avgJitter: number;
   maxJitter: number;
 }
+
+export interface SummaryResponse {
+  avg_throughput_mbps: number;
+  max_throughput_mbps: number;
+  min_throughput_mbps: number;
+  avg_jitter_ms: number;
+  max_jitter_ms: number;
+}
+
+export interface JitterResponse {
+  timestamp: string;
+  topology: string;
+  throughput_mbps: number;
+  jitter_ms: number;
+  packet_loss_pct: number;
+}
+
+export interface ThroughputResponse {
+  timestamp: string;
+  dpid: number;
+  port: number;
+  topology: string;
+  throughput_mbps: number;
+}

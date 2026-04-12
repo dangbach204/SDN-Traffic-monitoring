@@ -1,7 +1,11 @@
-export const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+export const METRICS = {
+  METRICS: "/metrics",
+  THROUGHPUT: "/metrics/throughput",
+  JITTER: "/metrics/jitter",
+  SUMMARY: "/metrics/summary",
+};
 
-export const API_ENDPOINTS = {
-  METRICS: "/api/metrics",
-  STATS: "/api/stats",
-} as const;
+export const STATS = {
+  FLOWS: "/metrics/summary",
+  IPERF: "/metrics/jitter",
+};
