@@ -7,6 +7,9 @@ import time
 
 import database, models, schemas
 
+import requests
+
+RYU_CONTROL_URL = "http://127.0.0.1:8080/qos/limit"
 RYU_URL = "http://127.0.0.1:8080/stats"
 POLL_INTERVAL = 5
 ALERT_THRESHOLD = 70  # %
@@ -128,3 +131,24 @@ def get_alerts(db: Session = Depends(database.get_db)):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+# CONTROL API
+@app.post("/control/limit")
+def limit_bandwidth(dpid: int, port: int, rate: int):
+    """
+    rate: Mbps
+    """
+
+    res = requests.post(RYU_CONTROL_URL, json={
+    "dpid": dpid,
+    "port": port,
+    "rate": rate
+})
+
+    try:
+        return res.json()
+    except:
+        return {
+            "status": "ok",
+            "ryu_response": res.text
+        }

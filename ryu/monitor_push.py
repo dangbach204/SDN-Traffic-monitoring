@@ -188,3 +188,62 @@ class StatsController(ControllerBase):
             content_type='application/json',
             body=json.dumps(self.app.stats).encode('utf-8')
         )
+
+    @route('qos', '/qos/limit', methods=['POST'])
+    def limit_bandwidth(self, req, **kwargs):
+        data = req.json
+
+        dpid = int(data["dpid"])
+        port = int(data["port"])
+        rate = int(data["rate"])  # Mbps
+
+        dp = self.app.datapaths.get(dpid)
+        if not dp:
+            return Response(status=404)
+
+        ofp = dp.ofproto
+        parser = dp.ofproto_parser
+
+        meter_id = port  # đơn giản: mỗi port 1 meter
+
+        bands = [
+            parser.OFPMeterBandDrop(
+                rate=rate * 1000,  # kbps
+                burst_size=10
+            )
+        ]
+
+        meter_mod = parser.OFPMeterMod(
+            datapath=dp,
+            command=ofp.OFPMC_ADD,
+            flags=ofp.OFPMF_KBPS,
+            meter_id=meter_id,
+            bands=bands
+        )
+
+        dp.send_msg(meter_mod)
+
+        # apply meter vào flow
+        match = parser.OFPMatch(in_port=port)
+
+        inst = [
+            parser.OFPInstructionMeter(meter_id),
+            parser.OFPInstructionActions(
+                ofp.OFPIT_APPLY_ACTIONS,
+                [parser.OFPActionOutput(ofp.OFPP_NORMAL)]
+            )
+        ]
+
+        mod = parser.OFPFlowMod(
+            datapath=dp,
+            priority=100,
+            match=match,
+            instructions=inst
+        )
+
+        dp.send_msg(mod)
+
+        return Response(
+            content_type='application/json',
+            body=json.dumps({"status": "limited"}).encode()
+        )
