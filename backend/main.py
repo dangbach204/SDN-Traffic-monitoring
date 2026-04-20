@@ -1,111 +1,129 @@
-from fastapi import FastAPI, Depends, Query
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
-from sqlalchemy import func as F
-from typing import Optional
+from contextlib import asynccontextmanager
+import requests
+import time
+
 import database, models, schemas
 
-# Tạo bảng nếu chưa có
+RYU_URL = "http://127.0.0.1:8080/stats"
+POLL_INTERVAL = 5
+ALERT_THRESHOLD = 70  # %
+
 models.Base.metadata.create_all(bind=database.engine)
 
-app = FastAPI(title="SDN Monitor API", version="1.0.0")
+
+# BACKGROUND TASK
+
+def fetch_and_store():
+    db = database.SessionLocal()
+
+    try:
+        res = requests.get(RYU_URL, timeout=3)
+        data = res.json()
+
+        for dpid, ports in data.items():
+            for port, stat in ports.items():
+
+                tx = stat["tx_mbps"]
+                rx = stat["rx_mbps"]
+                util = stat["utilization"]
+
+                row = models.FlowMetric(
+                    dpid=int(dpid),
+                    port=int(port),
+                    tx_mbps=tx,
+                    rx_mbps=rx,
+                    utilization=util
+                )
+
+                db.add(row)
+
+                # ALERT
+                if util > ALERT_THRESHOLD:
+                    db.add(models.Alert(
+                        dpid=int(dpid),
+                        port=int(port),
+                        utilization=util,
+                        message=f"High utilization {util}%"
+                    ))
+
+        db.commit()
+
+    except Exception as e:
+        print("[ERROR fetch]", e)
+
+    finally:
+        db.close()
+
+
+def scheduler():
+    while True:
+        fetch_and_store()
+        time.sleep(POLL_INTERVAL)
+
+
+# FASTAPI
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    import threading
+    t = threading.Thread(target=scheduler, daemon=True)
+    t.start()
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ── Nhận dữ liệu từ Ryu và iperf3 ─────────────────────────────────
 
-@app.post("/stats/flow")
-def receive_flow(stat: schemas.FlowStatIn,
-                 db: Session = Depends(database.get_db)):
-    db.add(models.FlowMetric(**stat.model_dump()))
-    db.commit()
-    return {"status": "ok"}
+# API
 
-@app.post("/stats/iperf")
-def receive_iperf(stat: schemas.IperfStatIn,
-                  db: Session = Depends(database.get_db)):
-    db.add(models.IperfMetric(**stat.model_dump()))
-    db.commit()
-    return {"status": "ok"}
+@app.get("/metrics", response_model=list[schemas.FlowStatOut])
+def get_metrics(db: Session = Depends(database.get_db)):
+    rows = db.query(models.FlowMetric)\
+        .order_by(models.FlowMetric.timestamp.desc())\
+        .limit(100)\
+        .all()
 
-# ── Cung cấp dữ liệu cho React Dashboard ──────────────────────────
-
-@app.get("/metrics/throughput", response_model=list[schemas.FlowStatOut])
-def get_throughput(
-    topology: Optional[str] = None,
-    limit: int = Query(60, le=500),
-    db: Session = Depends(database.get_db)
-):
-    q = db.query(models.FlowMetric)
-    if topology:
-        q = q.filter(models.FlowMetric.topology == topology)
-    rows = q.order_by(models.FlowMetric.timestamp.desc()).limit(limit).all()
     return [
         schemas.FlowStatOut(
             timestamp=r.timestamp.isoformat(),
-            dpid=r.dpid, port=r.port, topology=r.topology,
-            throughput_mbps=round(r.throughput_mbps, 3),
-        ) for r in reversed(rows)
+            dpid=r.dpid,
+            port=r.port,
+            tx_mbps=r.tx_mbps,
+            rx_mbps=r.rx_mbps,
+            utilization=r.utilization
+        )
+        for r in reversed(rows)
     ]
 
-@app.get("/metrics/jitter", response_model=list[schemas.IperfStatOut])
-def get_jitter(
-    topology: Optional[str] = None,
-    limit: int = Query(60, le=500),
-    db: Session = Depends(database.get_db)
-):
-    q = db.query(models.IperfMetric)
-    if topology:
-        q = q.filter(models.IperfMetric.topology == topology)
-    rows = q.order_by(models.IperfMetric.timestamp.desc()).limit(limit).all()
+
+@app.get("/alerts", response_model=list[schemas.AlertOut])
+def get_alerts(db: Session = Depends(database.get_db)):
+    rows = db.query(models.Alert)\
+        .order_by(models.Alert.timestamp.desc())\
+        .limit(50)\
+        .all()
+
     return [
-        schemas.IperfStatOut(
+        schemas.AlertOut(
             timestamp=r.timestamp.isoformat(),
-            topology=r.topology,
-            throughput_mbps=round(r.throughput_mbps, 3),
-            jitter_ms=round(r.jitter_ms, 4),
-            packet_loss_pct=round(
-                r.lost_packets / max(r.total_packets, 1) * 100, 2
-            ),
-        ) for r in reversed(rows)
+            dpid=r.dpid,
+            port=r.port,
+            utilization=r.utilization,
+            message=r.message
+        )
+        for r in rows
     ]
 
-@app.get("/metrics/summary")
-def get_summary(
-    topology: Optional[str] = None,
-    db: Session = Depends(database.get_db)
-):
-    fq = db.query(models.FlowMetric)
-    iq = db.query(models.IperfMetric)
-    if topology:
-        fq = fq.filter(models.FlowMetric.topology == topology)
-        iq = iq.filter(models.IperfMetric.topology == topology)
-
-    flow  = fq.with_entities(
-        F.avg(models.FlowMetric.throughput_mbps),
-        F.max(models.FlowMetric.throughput_mbps),
-        F.min(models.FlowMetric.throughput_mbps),
-    ).first()
-    iperf = iq.with_entities(
-        F.avg(models.IperfMetric.jitter_ms),
-        F.max(models.IperfMetric.jitter_ms),
-    ).first()
-
-    return {
-        "avg_throughput_mbps": round(flow[0] or 0, 2),
-        "max_throughput_mbps": round(flow[1] or 0, 2),
-        "min_throughput_mbps": round(flow[2] or 0, 2),
-        "avg_jitter_ms":       round(iperf[0] or 0, 4),
-        "max_jitter_ms":       round(iperf[1] or 0, 4),
-    }
 
 @app.get("/health")
 def health():
